@@ -1,2 +1,4 @@
-./receiver
-./sender
+sender
+receiver
+*.o
+*.bin
