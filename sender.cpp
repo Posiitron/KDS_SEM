@@ -8,18 +8,18 @@
 #include <vector>
 #include <openssl/evp.h>
 
-#define BUFFER_SIZE 1036
+#define BUFFER_SIZE 1100
 #define DATA_SIZE 1024
 #define SERVER_IP "192.168.39.125" 
 #define SERVER_PORT 8888
 #define TIMEOUT_US 100000 
 #define MD5_DIGEST_LENGTH 16
 
-struct Header {
+struct __attribute__((packed)) Header {
     uint32_t seq;
     uint32_t crc;
     uint32_t size;
-    uint8_t type; 
+    uint8_t type;
 };
 
 uint32_t calculateCRC32(const char *data, size_t length) {
@@ -40,6 +40,9 @@ uint32_t calculateCRC32(const char *data, size_t length) {
 
 void sendPacketReliable(int socket, sockaddr_in& addr, uint32_t seq, uint8_t type, const char* data, uint32_t size) {
     char packet[BUFFER_SIZE];
+
+    memset(packet, 0, BUFFER_SIZE);
+
     Header* head = (Header*)packet;
     head->seq = seq;
     head->size = size;
@@ -87,7 +90,7 @@ int main() {
     serverAddr.sin_port = htons(SERVER_PORT);
     inet_pton(AF_INET, SERVER_IP, &serverAddr.sin_addr);
 
-    std::string filename = "image.jpg";
+    std::string filename = "text.txt";
     std::ifstream file(filename, std::ios::binary | std::ios::ate);
 
     if (!file.is_open()) {

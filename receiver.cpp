@@ -8,11 +8,11 @@
 #include <openssl/evp.h>
 #include <iomanip>
 
-#define BUFFER_SIZE 1036 
+#define BUFFER_SIZE 1100 
 #define SERVER_PORT 8888
 #define MD5_DIGEST_LENGTH 16
 
-struct Header {
+struct __attribute__((packed)) Header {
     uint32_t seq;
     uint32_t crc;
     uint32_t size;
