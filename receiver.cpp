@@ -21,8 +21,10 @@ struct Header {
 
 uint32_t calculateCRC32(const char *data, size_t length) {
     uint32_t crc = 0xFFFFFFFF;
+    const unsigned char* p = (const unsigned char*)data; 
+
     for (size_t i = 0; i < length; i++) {
-        char ch = data[i];
+        unsigned char ch = p[i];
         for (size_t j = 0; j < 8; j++) {
             uint32_t b = (ch ^ crc) & 1;
             crc >>= 1;

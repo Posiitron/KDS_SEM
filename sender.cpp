@@ -10,7 +10,7 @@
 
 #define BUFFER_SIZE 1036
 #define DATA_SIZE 1024
-#define SERVER_IP "127.0.0.1" 
+#define SERVER_IP "192.168.39.125" 
 #define SERVER_PORT 8888
 #define TIMEOUT_US 100000 
 #define MD5_DIGEST_LENGTH 16
@@ -24,8 +24,10 @@ struct Header {
 
 uint32_t calculateCRC32(const char *data, size_t length) {
     uint32_t crc = 0xFFFFFFFF;
+    const unsigned char* p = (const unsigned char*)data; 
+
     for (size_t i = 0; i < length; i++) {
-        char ch = data[i];
+        unsigned char ch = p[i];
         for (size_t j = 0; j < 8; j++) {
             uint32_t b = (ch ^ crc) & 1;
             crc >>= 1;
