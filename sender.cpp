@@ -8,10 +8,11 @@
 #include <vector>
 #include <openssl/evp.h>
 
+#define NETDERPER_IP "127.0.0.1"
+#define TARGET_PORT 14000
+#define LOCAL_ACK_PORT 15001
 #define BUFFER_SIZE 1100
 #define DATA_SIZE 1024
-#define SERVER_IP "192.168.39.125" 
-#define SERVER_PORT 8888
 #define TIMEOUT_US 100000 
 #define MD5_DIGEST_LENGTH 16
 
@@ -19,13 +20,12 @@ struct __attribute__((packed)) Header {
     uint32_t seq;
     uint32_t crc;
     uint32_t size;
-    uint8_t type;
+    uint8_t type; 
 };
 
 uint32_t calculateCRC32(const char *data, size_t length) {
     uint32_t crc = 0xFFFFFFFF;
-    const unsigned char* p = (const unsigned char*)data; 
-
+    const unsigned char* p = (const unsigned char*)data;
     for (size_t i = 0; i < length; i++) {
         unsigned char ch = p[i];
         for (size_t j = 0; j < 8; j++) {
@@ -38,9 +38,8 @@ uint32_t calculateCRC32(const char *data, size_t length) {
     return ~crc;
 }
 
-void sendPacketReliable(int socket, sockaddr_in& addr, uint32_t seq, uint8_t type, const char* data, uint32_t size) {
+void sendPacketReliable(int socket, sockaddr_in& destAddr, uint32_t seq, uint8_t type, const char* data, uint32_t size) {
     char packet[BUFFER_SIZE];
-
     memset(packet, 0, BUFFER_SIZE);
 
     Header* head = (Header*)packet;
@@ -54,48 +53,51 @@ void sendPacketReliable(int socket, sockaddr_in& addr, uint32_t seq, uint8_t typ
     head->crc = calculateCRC32(packet, sizeof(Header) + size);
 
     bool acknowledged = false;
-    socklen_t addrLen = sizeof(addr);
-    char ackBuffer[sizeof(Header)];
+    socklen_t addrLen = sizeof(destAddr);
+    char ackBuffer[BUFFER_SIZE]; 
+    sockaddr_in fromAddr;
 
     while (!acknowledged) {
-        sendto(socket, packet, sizeof(Header) + size, 0, (const sockaddr*)&addr, sizeof(addr));
+        sendto(socket, packet, sizeof(Header) + size, 0, (const sockaddr*)&destAddr, sizeof(destAddr));
 
-        int n = recvfrom(socket, ackBuffer, sizeof(Header), 0, (sockaddr*)&addr, &addrLen);
+        int n = recvfrom(socket, ackBuffer, sizeof(Header), 0, (sockaddr*)&fromAddr, &addrLen);
         if (n > 0) {
             Header* ackHead = (Header*)ackBuffer;
             if (ackHead->type == 1 && ackHead->seq == seq) {
                 acknowledged = true;
             }
-        } else {
-             
-        }
+        } 
     }
 }
 
 int main() {
     int clientSocket = socket(AF_INET, SOCK_DGRAM, 0);
-    if (clientSocket < 0) {
-        std::cout << "[Error] Could not create socket." << std::endl;
-        return 1;
-    }
+    if (clientSocket < 0) return 1;
+
+    sockaddr_in myAddr;
+    memset(&myAddr, 0, sizeof(myAddr));
+    myAddr.sin_family = AF_INET;
+    myAddr.sin_port = htons(LOCAL_ACK_PORT);
+    myAddr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(clientSocket, (const sockaddr*)&myAddr, sizeof(myAddr)) < 0) return 1;
 
     struct timeval tv;
     tv.tv_sec = 0;
     tv.tv_usec = TIMEOUT_US;
     setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
 
-    sockaddr_in serverAddr;
-    memset(&serverAddr, 0, sizeof(serverAddr));
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(SERVER_PORT);
-    inet_pton(AF_INET, SERVER_IP, &serverAddr.sin_addr);
+    sockaddr_in netDerperAddr;
+    memset(&netDerperAddr, 0, sizeof(netDerperAddr));
+    netDerperAddr.sin_family = AF_INET;
+    netDerperAddr.sin_port = htons(TARGET_PORT);
+    inet_pton(AF_INET, NETDERPER_IP, &netDerperAddr.sin_addr);
 
-    std::string filename = "text.txt";
+    std::string filename = "image.jpg";
     std::ifstream file(filename, std::ios::binary | std::ios::ate);
 
     if (!file.is_open()) {
         close(clientSocket);
-        std::cout << "[Error] Could not open file: " << filename << std::endl;
         return 1;
     }
 
@@ -108,7 +110,7 @@ int main() {
     uint32_t seqNum = 0;
 
     std::string metaData = filename + "|" + std::to_string(fileSize);
-    sendPacketReliable(clientSocket, serverAddr, seqNum++, 3, metaData.c_str(), metaData.length());
+    sendPacketReliable(clientSocket, netDerperAddr, seqNum++, 3, metaData.c_str(), metaData.length());
 
     char buffer[DATA_SIZE];
     while (file.good()) {
@@ -116,7 +118,7 @@ int main() {
         int bytesRead = (int)file.gcount();
         if (bytesRead > 0) {
             EVP_DigestUpdate(md5Context, buffer, bytesRead);
-            sendPacketReliable(clientSocket, serverAddr, seqNum++, 0, buffer, bytesRead);
+            sendPacketReliable(clientSocket, netDerperAddr, seqNum++, 0, buffer, bytesRead);
         }
     }
 
@@ -128,11 +130,11 @@ int main() {
     char hexHash[33];
     for(int i = 0; i < MD5_DIGEST_LENGTH; i++) snprintf(hexHash + (i * 2), 3, "%02x", hash[i]);
 
-    sendPacketReliable(clientSocket, serverAddr, seqNum++, 3, hexHash, 32);
+    sendPacketReliable(clientSocket, netDerperAddr, seqNum++, 3, hexHash, 32);
 
     file.close();
     close(clientSocket);
 
-    std::cout << "[Info] File sent with reliable Stop-and-Wait." << std::endl;
+    std::cout << "Done." << std::endl;
     return 0;
 }
