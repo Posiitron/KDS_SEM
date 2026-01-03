@@ -6,10 +6,66 @@
 #include <string>
 #include <cstring>
 #include <vector>
+#include <openssl/evp.h>
 
-#define BUFFER_SIZE 1024
-#define SERVER_IP "192.168.39.125"
+#define BUFFER_SIZE 1036
+#define DATA_SIZE 1024
+#define SERVER_IP "127.0.0.1" 
 #define SERVER_PORT 8888
+#define TIMEOUT_US 100000 
+#define MD5_DIGEST_LENGTH 16
+
+struct Header {
+    uint32_t seq;
+    uint32_t crc;
+    uint32_t size;
+    uint8_t type; 
+};
+
+uint32_t calculateCRC32(const char *data, size_t length) {
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < length; i++) {
+        char ch = data[i];
+        for (size_t j = 0; j < 8; j++) {
+            uint32_t b = (ch ^ crc) & 1;
+            crc >>= 1;
+            if (b) crc = crc ^ 0xEDB88320;
+            ch >>= 1;
+        }
+    }
+    return ~crc;
+}
+
+void sendPacketReliable(int socket, sockaddr_in& addr, uint32_t seq, uint8_t type, const char* data, uint32_t size) {
+    char packet[BUFFER_SIZE];
+    Header* head = (Header*)packet;
+    head->seq = seq;
+    head->size = size;
+    head->type = type;
+    head->crc = 0;
+
+    if (size > 0) memcpy(packet + sizeof(Header), data, size);
+    
+    head->crc = calculateCRC32(packet, sizeof(Header) + size);
+
+    bool acknowledged = false;
+    socklen_t addrLen = sizeof(addr);
+    char ackBuffer[sizeof(Header)];
+
+    while (!acknowledged) {
+        sendto(socket, packet, sizeof(Header) + size, 0, (const sockaddr*)&addr, sizeof(addr));
+
+        int n = recvfrom(socket, ackBuffer, sizeof(Header), 0, (sockaddr*)&addr, &addrLen);
+        if (n > 0) {
+            Header* ackHead = (Header*)ackBuffer;
+            if (ackHead->type == 1 && ackHead->seq == seq) {
+                acknowledged = true;
+            }
+        } else {
+             
+        }
+    }
+}
 
 int main() {
     int clientSocket = socket(AF_INET, SOCK_DGRAM, 0);
@@ -18,13 +74,18 @@ int main() {
         return 1;
     }
 
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = TIMEOUT_US;
+    setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+
     sockaddr_in serverAddr;
     memset(&serverAddr, 0, sizeof(serverAddr));
     serverAddr.sin_family = AF_INET;
     serverAddr.sin_port = htons(SERVER_PORT);
     inet_pton(AF_INET, SERVER_IP, &serverAddr.sin_addr);
 
-    std::string filename = "text.txt";
+    std::string filename = "image.jpg";
     std::ifstream file(filename, std::ios::binary | std::ios::ate);
 
     if (!file.is_open()) {
@@ -36,42 +97,37 @@ int main() {
     std::streamsize fileSize = file.tellg();
     file.seekg(0, std::ios::beg);
 
-    std::string nameMsg = "NAME=" + filename;
-    sendto(clientSocket, nameMsg.c_str(), nameMsg.length(), 0, (const sockaddr*)&serverAddr, sizeof(serverAddr));
-    usleep(10000);
+    EVP_MD_CTX* md5Context = EVP_MD_CTX_new();
+    EVP_DigestInit_ex(md5Context, EVP_md5(), NULL);
 
-    std::string sizeMsg = "SIZE=" + std::to_string(fileSize);
-    sendto(clientSocket, sizeMsg.c_str(), sizeMsg.length(), 0, (const sockaddr*)&serverAddr, sizeof(serverAddr));
-    usleep(10000);
+    uint32_t seqNum = 0;
 
-    std::string startMsg = "START";
-    sendto(clientSocket, startMsg.c_str(), startMsg.length(), 0, (const sockaddr*)&serverAddr, sizeof(serverAddr));
-    usleep(10000);
+    std::string metaData = filename + "|" + std::to_string(fileSize);
+    sendPacketReliable(clientSocket, serverAddr, seqNum++, 3, metaData.c_str(), metaData.length());
 
-    char buffer[BUFFER_SIZE];
-    uint32_t offset = 0;
-
-    while (file.good() && offset < fileSize) {
-        file.read(buffer + 8, BUFFER_SIZE - 8);
+    char buffer[DATA_SIZE];
+    while (file.good()) {
+        file.read(buffer, DATA_SIZE);
         int bytesRead = (int)file.gcount();
-
         if (bytesRead > 0) {
-            memcpy(buffer, "DATA", 4);
-            memcpy(buffer + 4, &offset, sizeof(uint32_t));
-
-            sendto(clientSocket, buffer, bytesRead + 8, 0, (const sockaddr*)&serverAddr, sizeof(serverAddr));
-
-            offset += bytesRead;
-            usleep(5000);
+            EVP_DigestUpdate(md5Context, buffer, bytesRead);
+            sendPacketReliable(clientSocket, serverAddr, seqNum++, 0, buffer, bytesRead);
         }
     }
 
-    std::string stopMsg = "STOP";
-    sendto(clientSocket, stopMsg.c_str(), stopMsg.length(), 0, (const sockaddr*)&serverAddr, sizeof(serverAddr));
+    unsigned char hash[MD5_DIGEST_LENGTH];
+    unsigned int mdLen;
+    EVP_DigestFinal_ex(md5Context, hash, &mdLen);
+    EVP_MD_CTX_free(md5Context);
+    
+    char hexHash[33];
+    for(int i = 0; i < MD5_DIGEST_LENGTH; i++) snprintf(hexHash + (i * 2), 3, "%02x", hash[i]);
+
+    sendPacketReliable(clientSocket, serverAddr, seqNum++, 3, hexHash, 32);
 
     file.close();
     close(clientSocket);
 
-    std::cout << "[Info] File succesfully sent." << std::endl;
+    std::cout << "[Info] File sent with reliable Stop-and-Wait." << std::endl;
     return 0;
 }
