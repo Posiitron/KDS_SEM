@@ -8,7 +8,7 @@
 #include <vector>
 
 #define BUFFER_SIZE 1024
-#define SERVER_IP "127.0.0.1"
+#define SERVER_IP "192.168.39.125"
 #define SERVER_PORT 8888
 
 int main() {
