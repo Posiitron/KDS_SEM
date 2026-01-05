@@ -93,7 +93,7 @@ int main() {
     netDerperAddr.sin_port = htons(TARGET_PORT);
     inet_pton(AF_INET, NETDERPER_IP, &netDerperAddr.sin_addr);
 
-    std::string filename = "image.jpg";
+    std::string filename = "text.txt";
     std::ifstream file(filename, std::ios::binary | std::ios::ate);
 
     if (!file.is_open()) {

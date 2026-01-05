@@ -11,16 +11,15 @@
 #include <openssl/evp.h>
 #include <fcntl.h>
 
-// NetDerper Configuration
 #define NETDERPER_IP "127.0.0.1"
 #define TARGET_PORT 14000
 #define LOCAL_ACK_PORT 15001
 
-// Protocol Configuration
 #define BUFFER_SIZE 1100
 #define DATA_SIZE 1024
-#define WINDOW_SIZE 8        // Velikost vysilaciho okna
-#define TIMEOUT_MS 200       // Timeout v milisekundach
+#define WINDOW_SIZE 8        
+#define TIMEOUT_MS 200       
+#define MD5_DIGEST_LENGTH 16 
 
 struct __attribute__((packed)) Header {
     uint32_t seq;
@@ -69,7 +68,6 @@ void sendPacket(int socket, sockaddr_in& destAddr, WindowSlot& slot) {
 
     sendto(socket, packet, sizeof(Header) + slot.dataSize, 0, (const sockaddr*)&destAddr, sizeof(destAddr));
     
-    // Update timer
     slot.timeSent = std::chrono::steady_clock::now();
 }
 
@@ -77,7 +75,6 @@ int main() {
     int clientSocket = socket(AF_INET, SOCK_DGRAM, 0);
     if (clientSocket < 0) return 1;
 
-    // Set socket to non-blocking for SR logic
     int flags = fcntl(clientSocket, F_GETFL, 0);
     fcntl(clientSocket, F_SETFL, flags | O_NONBLOCK);
 
@@ -109,10 +106,8 @@ int main() {
     uint32_t base = 0;
     uint32_t nextSeqNum = 0;
     bool allDataRead = false;
-    bool metaSent = false;
     bool hashSent = false;
 
-    // Phase 1: Prepare Metadata Packet
     WindowSlot metaSlot;
     metaSlot.seq = nextSeqNum++;
     metaSlot.type = 3;
@@ -127,10 +122,8 @@ int main() {
     sockaddr_in fromAddr;
     socklen_t addrLen = sizeof(fromAddr);
 
-    // Main Loop
     while (base < nextSeqNum || !hashSent) {
         
-        // 1. Fill Window
         while (window.size() < WINDOW_SIZE && !hashSent) {
             WindowSlot newSlot;
             newSlot.seq = nextSeqNum;
@@ -140,7 +133,7 @@ int main() {
                 file.read(newSlot.data, DATA_SIZE);
                 newSlot.dataSize = file.gcount();
                 if (newSlot.dataSize > 0) {
-                    newSlot.type = 0; // DATA
+                    newSlot.type = 0; 
                     EVP_DigestUpdate(md5Context, newSlot.data, newSlot.dataSize);
                 }
                 
@@ -154,7 +147,6 @@ int main() {
                     nextSeqNum++;
                 }
             } else {
-                // Prepare Hash Packet
                 unsigned char hash[MD5_DIGEST_LENGTH];
                 unsigned int mdLen;
                 EVP_DigestFinal_ex(md5Context, hash, &mdLen);
@@ -162,7 +154,7 @@ int main() {
                 char hexHash[33];
                 for(int i = 0; i < MD5_DIGEST_LENGTH; i++) snprintf(hexHash + (i * 2), 3, "%02x", hash[i]);
                 
-                newSlot.type = 3; // META (End)
+                newSlot.type = 3; 
                 newSlot.dataSize = 32;
                 memcpy(newSlot.data, hexHash, 32);
                 
@@ -173,12 +165,10 @@ int main() {
             }
         }
 
-        // 2. Receive ACKs (Non-blocking)
         int n = recvfrom(clientSocket, ackBuffer, sizeof(Header), 0, (sockaddr*)&fromAddr, &addrLen);
         if (n > 0) {
             Header* ackHead = (Header*)ackBuffer;
-            if (ackHead->type == 1) { // ACK
-                // Find packet in window and mark acked
+            if (ackHead->type == 1) { 
                 for (auto &slot : window) {
                     if (slot.seq == ackHead->seq) {
                         slot.acked = true;
@@ -186,7 +176,6 @@ int main() {
                     }
                 }
                 
-                // Slide Window
                 while (!window.empty() && window.front().acked) {
                     window.pop_front();
                     base++;
@@ -194,24 +183,22 @@ int main() {
             }
         }
 
-        // 3. Check Timeouts
         auto now = std::chrono::steady_clock::now();
         for (auto &slot : window) {
             if (!slot.acked) {
                 auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - slot.timeSent).count();
                 if (duration > TIMEOUT_MS) {
-                    // Resend only this packet
                     sendPacket(clientSocket, netDerperAddr, slot);
                 }
             }
         }
 
-        usleep(1000); // Prevent 100% CPU usage
+        usleep(1000); 
     }
 
     EVP_MD_CTX_free(md5Context);
     file.close();
     close(clientSocket);
-    std::cout << "Done. All packets acknowledged." << std::endl;
+    std::cout << "Done." << std::endl;
     return 0;
 }
