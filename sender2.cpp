@@ -6,21 +6,36 @@
 #include <string>
 #include <cstring>
 #include <vector>
+#include <deque>
+#include <chrono>
 #include <openssl/evp.h>
+#include <fcntl.h>
 
+// NetDerper Configuration
 #define NETDERPER_IP "127.0.0.1"
 #define TARGET_PORT 14000
 #define LOCAL_ACK_PORT 15001
+
+// Protocol Configuration
 #define BUFFER_SIZE 1100
 #define DATA_SIZE 1024
-#define TIMEOUT_US 100000 
-#define MD5_DIGEST_LENGTH 16
+#define WINDOW_SIZE 8        // Velikost vysilaciho okna
+#define TIMEOUT_MS 200       // Timeout v milisekundach
 
 struct __attribute__((packed)) Header {
     uint32_t seq;
     uint32_t crc;
     uint32_t size;
     uint8_t type; 
+};
+
+struct WindowSlot {
+    uint32_t seq;
+    uint8_t type;
+    char data[DATA_SIZE];
+    uint32_t dataSize;
+    bool acked;
+    std::chrono::steady_clock::time_point timeSent;
 };
 
 uint32_t calculateCRC32(const char *data, size_t length) {
@@ -38,41 +53,33 @@ uint32_t calculateCRC32(const char *data, size_t length) {
     return ~crc;
 }
 
-void sendPacketReliable(int socket, sockaddr_in& destAddr, uint32_t seq, uint8_t type, const char* data, uint32_t size) {
+void sendPacket(int socket, sockaddr_in& destAddr, WindowSlot& slot) {
     char packet[BUFFER_SIZE];
     memset(packet, 0, BUFFER_SIZE);
 
     Header* head = (Header*)packet;
-    head->seq = seq;
-    head->size = size;
-    head->type = type;
+    head->seq = slot.seq;
+    head->size = slot.dataSize;
+    head->type = slot.type;
     head->crc = 0;
 
-    if (size > 0) memcpy(packet + sizeof(Header), data, size);
+    if (slot.dataSize > 0) memcpy(packet + sizeof(Header), slot.data, slot.dataSize);
     
-    head->crc = calculateCRC32(packet, sizeof(Header) + size);
+    head->crc = calculateCRC32(packet, sizeof(Header) + slot.dataSize);
 
-    bool acknowledged = false;
-    socklen_t addrLen = sizeof(destAddr);
-    char ackBuffer[BUFFER_SIZE]; 
-    sockaddr_in fromAddr;
-
-    while (!acknowledged) {
-        sendto(socket, packet, sizeof(Header) + size, 0, (const sockaddr*)&destAddr, sizeof(destAddr));
-
-        int n = recvfrom(socket, ackBuffer, sizeof(Header), 0, (sockaddr*)&fromAddr, &addrLen);
-        if (n > 0) {
-            Header* ackHead = (Header*)ackBuffer;
-            if (ackHead->type == 1 && ackHead->seq == seq) {
-                acknowledged = true;
-            }
-        } 
-    }
+    sendto(socket, packet, sizeof(Header) + slot.dataSize, 0, (const sockaddr*)&destAddr, sizeof(destAddr));
+    
+    // Update timer
+    slot.timeSent = std::chrono::steady_clock::now();
 }
 
 int main() {
     int clientSocket = socket(AF_INET, SOCK_DGRAM, 0);
     if (clientSocket < 0) return 1;
+
+    // Set socket to non-blocking for SR logic
+    int flags = fcntl(clientSocket, F_GETFL, 0);
+    fcntl(clientSocket, F_SETFL, flags | O_NONBLOCK);
 
     sockaddr_in myAddr;
     memset(&myAddr, 0, sizeof(myAddr));
@@ -82,11 +89,6 @@ int main() {
 
     if (bind(clientSocket, (const sockaddr*)&myAddr, sizeof(myAddr)) < 0) return 1;
 
-    struct timeval tv;
-    tv.tv_sec = 0;
-    tv.tv_usec = TIMEOUT_US;
-    setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
-
     sockaddr_in netDerperAddr;
     memset(&netDerperAddr, 0, sizeof(netDerperAddr));
     netDerperAddr.sin_family = AF_INET;
@@ -95,11 +97,7 @@ int main() {
 
     std::string filename = "image.jpg";
     std::ifstream file(filename, std::ios::binary | std::ios::ate);
-
-    if (!file.is_open()) {
-        close(clientSocket);
-        return 1;
-    }
+    if (!file.is_open()) return 1;
 
     std::streamsize fileSize = file.tellg();
     file.seekg(0, std::ios::beg);
@@ -107,34 +105,113 @@ int main() {
     EVP_MD_CTX* md5Context = EVP_MD_CTX_new();
     EVP_DigestInit_ex(md5Context, EVP_md5(), NULL);
 
-    uint32_t seqNum = 0;
+    std::deque<WindowSlot> window;
+    uint32_t base = 0;
+    uint32_t nextSeqNum = 0;
+    bool allDataRead = false;
+    bool metaSent = false;
+    bool hashSent = false;
 
-    std::string metaData = filename + "|" + std::to_string(fileSize);
-    sendPacketReliable(clientSocket, netDerperAddr, seqNum++, 3, metaData.c_str(), metaData.length());
+    // Phase 1: Prepare Metadata Packet
+    WindowSlot metaSlot;
+    metaSlot.seq = nextSeqNum++;
+    metaSlot.type = 3;
+    std::string metaStr = filename + "|" + std::to_string(fileSize);
+    metaSlot.dataSize = metaStr.length();
+    memcpy(metaSlot.data, metaStr.c_str(), metaSlot.dataSize);
+    metaSlot.acked = false;
+    window.push_back(metaSlot);
+    sendPacket(clientSocket, netDerperAddr, window.back());
 
-    char buffer[DATA_SIZE];
-    while (file.good()) {
-        file.read(buffer, DATA_SIZE);
-        int bytesRead = (int)file.gcount();
-        if (bytesRead > 0) {
-            EVP_DigestUpdate(md5Context, buffer, bytesRead);
-            sendPacketReliable(clientSocket, netDerperAddr, seqNum++, 0, buffer, bytesRead);
+    char ackBuffer[BUFFER_SIZE];
+    sockaddr_in fromAddr;
+    socklen_t addrLen = sizeof(fromAddr);
+
+    // Main Loop
+    while (base < nextSeqNum || !hashSent) {
+        
+        // 1. Fill Window
+        while (window.size() < WINDOW_SIZE && !hashSent) {
+            WindowSlot newSlot;
+            newSlot.seq = nextSeqNum;
+            newSlot.acked = false;
+
+            if (!allDataRead) {
+                file.read(newSlot.data, DATA_SIZE);
+                newSlot.dataSize = file.gcount();
+                if (newSlot.dataSize > 0) {
+                    newSlot.type = 0; // DATA
+                    EVP_DigestUpdate(md5Context, newSlot.data, newSlot.dataSize);
+                }
+                
+                if (file.eof() || newSlot.dataSize == 0) {
+                    allDataRead = true;
+                }
+                
+                if (newSlot.dataSize > 0) {
+                    window.push_back(newSlot);
+                    sendPacket(clientSocket, netDerperAddr, window.back());
+                    nextSeqNum++;
+                }
+            } else {
+                // Prepare Hash Packet
+                unsigned char hash[MD5_DIGEST_LENGTH];
+                unsigned int mdLen;
+                EVP_DigestFinal_ex(md5Context, hash, &mdLen);
+                
+                char hexHash[33];
+                for(int i = 0; i < MD5_DIGEST_LENGTH; i++) snprintf(hexHash + (i * 2), 3, "%02x", hash[i]);
+                
+                newSlot.type = 3; // META (End)
+                newSlot.dataSize = 32;
+                memcpy(newSlot.data, hexHash, 32);
+                
+                window.push_back(newSlot);
+                sendPacket(clientSocket, netDerperAddr, window.back());
+                nextSeqNum++;
+                hashSent = true;
+            }
         }
+
+        // 2. Receive ACKs (Non-blocking)
+        int n = recvfrom(clientSocket, ackBuffer, sizeof(Header), 0, (sockaddr*)&fromAddr, &addrLen);
+        if (n > 0) {
+            Header* ackHead = (Header*)ackBuffer;
+            if (ackHead->type == 1) { // ACK
+                // Find packet in window and mark acked
+                for (auto &slot : window) {
+                    if (slot.seq == ackHead->seq) {
+                        slot.acked = true;
+                        break;
+                    }
+                }
+                
+                // Slide Window
+                while (!window.empty() && window.front().acked) {
+                    window.pop_front();
+                    base++;
+                }
+            }
+        }
+
+        // 3. Check Timeouts
+        auto now = std::chrono::steady_clock::now();
+        for (auto &slot : window) {
+            if (!slot.acked) {
+                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - slot.timeSent).count();
+                if (duration > TIMEOUT_MS) {
+                    // Resend only this packet
+                    sendPacket(clientSocket, netDerperAddr, slot);
+                }
+            }
+        }
+
+        usleep(1000); // Prevent 100% CPU usage
     }
 
-    unsigned char hash[MD5_DIGEST_LENGTH];
-    unsigned int mdLen;
-    EVP_DigestFinal_ex(md5Context, hash, &mdLen);
     EVP_MD_CTX_free(md5Context);
-    
-    char hexHash[33];
-    for(int i = 0; i < MD5_DIGEST_LENGTH; i++) snprintf(hexHash + (i * 2), 3, "%02x", hash[i]);
-
-    sendPacketReliable(clientSocket, netDerperAddr, seqNum++, 3, hexHash, 32);
-
     file.close();
     close(clientSocket);
-
-    std::cout << "Done." << std::endl;
+    std::cout << "Done. All packets acknowledged." << std::endl;
     return 0;
 }
