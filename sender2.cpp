@@ -18,7 +18,7 @@
 #define BUFFER_SIZE 1100
 #define DATA_SIZE 1024
 #define WINDOW_SIZE 8        
-#define TIMEOUT_MS 200       
+#define TIMEOUT_MS 600       
 #define MD5_DIGEST_LENGTH 16 
 
 #define TYPE_DATA 0

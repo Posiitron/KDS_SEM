@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <map>
 #include <vector>
+#include <chrono>
 
 #define LISTEN_PORT 15000
 #define ACK_TARGET_PORT 14001
@@ -59,6 +60,11 @@ int main() {
     // create and configure sockets
     int serverSocket = socket(AF_INET, SOCK_DGRAM, 0);
     if (serverSocket < 0) return 1;
+
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 10000; 
+    setsockopt(serverSocket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     sockaddr_in serverAddr, clientAddr;
     memset(&serverAddr, 0, sizeof(serverAddr));
@@ -165,6 +171,21 @@ int main() {
 
     // cleanup
     if (outFile.is_open()) outFile.close();
+    
+    auto startTimeWait = std::chrono::steady_clock::now();
+    while (true) {
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - startTimeWait).count() > 3000) break;
+
+        int n = recvfrom(serverSocket, buffer, BUFFER_SIZE, 0, (sockaddr*)&clientAddr, &clientAddrLen);
+        if (n > 0) {
+            Header* head = (Header*)buffer;
+            if (head->type == TYPE_METADATA && head->seq == expectedSeq - 1) {
+                sendAck(serverSocket, clientAddr, head->seq);
+            }
+        }
+    }
+
     close(serverSocket);
 
     unsigned char localHashBytes[MD5_DIGEST_LENGTH];
