@@ -21,6 +21,11 @@
 #define TIMEOUT_MS 200       
 #define MD5_DIGEST_LENGTH 16 
 
+#define TYPE_DATA 0
+#define TYPE_ACK 1
+#define TYPE_NACK 2
+#define TYPE_METADATA 3
+
 struct __attribute__((packed)) Header {
     uint32_t seq;
     uint32_t crc;
@@ -71,7 +76,8 @@ void sendPacket(int socket, sockaddr_in& destAddr, WindowSlot& slot) {
     slot.timeSent = std::chrono::steady_clock::now();
 }
 
-int main() {
+int main(int argc, char* argv[]) {
+    // create and configure sockets
     int clientSocket = socket(AF_INET, SOCK_DGRAM, 0);
     if (clientSocket < 0) return 1;
 
@@ -92,25 +98,29 @@ int main() {
     netDerperAddr.sin_port = htons(TARGET_PORT);
     inet_pton(AF_INET, NETDERPER_IP, &netDerperAddr.sin_addr);
 
-    std::string filename = "text.txt";
+    // prepare file
+    std::string filename = argv[1];
     std::ifstream file(filename, std::ios::binary | std::ios::ate);
     if (!file.is_open()) return 1;
 
     std::streamsize fileSize = file.tellg();
     file.seekg(0, std::ios::beg);
 
+    // prepare MD5 context
     EVP_MD_CTX* md5Context = EVP_MD_CTX_new();
     EVP_DigestInit_ex(md5Context, EVP_md5(), NULL);
 
+    // initialize queue
     std::deque<WindowSlot> window;
     uint32_t base = 0;
     uint32_t nextSeqNum = 0;
     bool allDataRead = false;
     bool hashSent = false;
 
+    // add start metadata to queue
     WindowSlot metaSlot;
     metaSlot.seq = nextSeqNum++;
-    metaSlot.type = 3;
+    metaSlot.type = TYPE_METADATA;
     std::string metaStr = filename + "|" + std::to_string(fileSize);
     metaSlot.dataSize = metaStr.length();
     memcpy(metaSlot.data, metaStr.c_str(), metaSlot.dataSize);
@@ -122,31 +132,37 @@ int main() {
     sockaddr_in fromAddr;
     socklen_t addrLen = sizeof(fromAddr);
 
+    // main sending loop
     while (base < nextSeqNum || !hashSent) {
         
         while (window.size() < WINDOW_SIZE && !hashSent) {
+            // add new to queue
             WindowSlot newSlot;
             newSlot.seq = nextSeqNum;
             newSlot.acked = false;
 
             if (!allDataRead) {
+                // add data to the packet
                 file.read(newSlot.data, DATA_SIZE);
                 newSlot.dataSize = file.gcount();
                 if (newSlot.dataSize > 0) {
-                    newSlot.type = 0; 
+                    newSlot.type = TYPE_DATA; 
                     EVP_DigestUpdate(md5Context, newSlot.data, newSlot.dataSize);
                 }
                 
+                // check for EOF
                 if (file.eof() || newSlot.dataSize == 0) {
                     allDataRead = true;
                 }
                 
+                // send packet if it has data
                 if (newSlot.dataSize > 0) {
                     window.push_back(newSlot);
                     sendPacket(clientSocket, netDerperAddr, window.back());
                     nextSeqNum++;
                 }
             } else {
+                // reached end of the file, send hash
                 unsigned char hash[MD5_DIGEST_LENGTH];
                 unsigned int mdLen;
                 EVP_DigestFinal_ex(md5Context, hash, &mdLen);
@@ -154,7 +170,7 @@ int main() {
                 char hexHash[33];
                 for(int i = 0; i < MD5_DIGEST_LENGTH; i++) snprintf(hexHash + (i * 2), 3, "%02x", hash[i]);
                 
-                newSlot.type = 3; 
+                newSlot.type = TYPE_METADATA; 
                 newSlot.dataSize = 32;
                 memcpy(newSlot.data, hexHash, 32);
                 
@@ -165,10 +181,12 @@ int main() {
             }
         }
 
+        // check for acks
         int n = recvfrom(clientSocket, ackBuffer, sizeof(Header), 0, (sockaddr*)&fromAddr, &addrLen);
         if (n > 0) {
             Header* ackHead = (Header*)ackBuffer;
-            if (ackHead->type == 1) { 
+            // if ack received flag corresponding slot
+            if (ackHead->type == TYPE_ACK) { 
                 for (auto &slot : window) {
                     if (slot.seq == ackHead->seq) {
                         slot.acked = true;
@@ -176,6 +194,7 @@ int main() {
                     }
                 }
                 
+                // pop acked slot from front
                 while (!window.empty() && window.front().acked) {
                     window.pop_front();
                     base++;
@@ -183,6 +202,7 @@ int main() {
             }
         }
 
+        // resend timed-out packets
         auto now = std::chrono::steady_clock::now();
         for (auto &slot : window) {
             if (!slot.acked) {
@@ -196,6 +216,7 @@ int main() {
         usleep(1000); 
     }
 
+    // cleanup
     EVP_MD_CTX_free(md5Context);
     file.close();
     close(clientSocket);

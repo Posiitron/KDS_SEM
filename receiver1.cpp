@@ -97,7 +97,8 @@ int main() {
 
             // send nack on CRC mismatch
             if (calculatedCRC != receivedCRC) {
-                sendControl(serverSocket, clientAddr, head->seq, TYPE_NACK); 
+                sendControl(serverSocket, clientAddr, head->seq, TYPE_NACK);
+                std::cout << "[CRC Error] Reporting seq mismatch " << head->seq << std::endl;
                 continue;
             }
 
