@@ -171,21 +171,6 @@ int main() {
 
     // cleanup
     if (outFile.is_open()) outFile.close();
-    
-    auto startTimeWait = std::chrono::steady_clock::now();
-    while (true) {
-        auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - startTimeWait).count() > 3000) break;
-
-        int n = recvfrom(serverSocket, buffer, BUFFER_SIZE, 0, (sockaddr*)&clientAddr, &clientAddrLen);
-        if (n > 0) {
-            Header* head = (Header*)buffer;
-            if (head->type == TYPE_METADATA && head->seq == expectedSeq - 1) {
-                sendAck(serverSocket, clientAddr, head->seq);
-            }
-        }
-    }
-
     close(serverSocket);
 
     unsigned char localHashBytes[MD5_DIGEST_LENGTH];
