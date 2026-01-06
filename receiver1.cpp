@@ -13,6 +13,12 @@
 #define BUFFER_SIZE 1100 
 #define MD5_DIGEST_LENGTH 16
 
+#define TYPE_DATA 0
+#define TYPE_ACK 1
+#define TYPE_NACK 2
+#define TYPE_METADATA 3
+
+
 struct __attribute__((packed)) Header {
     uint32_t seq;
     uint32_t crc;
@@ -36,6 +42,7 @@ uint32_t calculateCRC32(const char *data, size_t length) {
 }
 
 void sendControl(int socket, sockaddr_in& senderAddr, uint32_t seq, uint8_t type) {
+    // send ack or nack
     Header head;
     head.seq = seq;
     head.type = type; 
@@ -49,6 +56,7 @@ void sendControl(int socket, sockaddr_in& senderAddr, uint32_t seq, uint8_t type
 }
 
 int main() {
+    // create and configure sockets
     int serverSocket = socket(AF_INET, SOCK_DGRAM, 0);
     if (serverSocket < 0) return 1;
 
@@ -67,9 +75,11 @@ int main() {
     char buffer[BUFFER_SIZE];
     std::ofstream outFile;
     
+    // prepare MD5 context
     EVP_MD_CTX* md5Context = EVP_MD_CTX_new();
     EVP_DigestInit_ex(md5Context, EVP_md5(), NULL);
     
+    // main receiving loop
     uint32_t expectedSeq = 0;
     bool finished = false;
     std::string finalRemoteHash = "";
@@ -85,38 +95,44 @@ int main() {
             head->crc = 0; 
             uint32_t calculatedCRC = calculateCRC32(buffer, bytesReceived);
 
+            // send nack on CRC mismatch
             if (calculatedCRC != receivedCRC) {
-                sendControl(serverSocket, clientAddr, head->seq, 2); 
+                sendControl(serverSocket, clientAddr, head->seq, TYPE_NACK); 
                 continue;
             }
 
+            // in-order packet processing
             if (head->seq == expectedSeq) {
-                if (head->type == 3) { 
+                if (head->type == TYPE_METADATA) { 
                     std::string payload(buffer + sizeof(Header), head->size);
+                    // start packet
                     if (head->seq == 0) {
                         size_t delimiter = payload.find('|');
                         std::string filename = "received_" + payload.substr(0, delimiter);
                         outFile.open(filename, std::ios::binary);
                         std::cout << "Receiving: " << filename << std::endl;
+                    // end packet
                     } else {
                         finalRemoteHash = payload;
                         finished = true;
                     }
-                } else if (head->type == 0) { 
+                } else if (head->type == TYPE_DATA) { 
                      if (outFile.is_open()) {
                         outFile.write(buffer + sizeof(Header), head->size);
                         EVP_DigestUpdate(md5Context, buffer + sizeof(Header), head->size);
                      }
                 }
-                
-                sendControl(serverSocket, clientAddr, head->seq, 1); 
+                // send ack
+                sendControl(serverSocket, clientAddr, head->seq, TYPE_ACK); 
                 expectedSeq++;
+            // just send ack anyway
             } else if (head->seq < expectedSeq) {
-                sendControl(serverSocket, clientAddr, head->seq, 1); 
+                sendControl(serverSocket, clientAddr, head->seq, TYPE_ACK); 
             }
         }
     }
 
+    // cleanup
     if (outFile.is_open()) outFile.close();
     close(serverSocket);
 

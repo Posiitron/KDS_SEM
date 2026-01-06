@@ -16,6 +16,11 @@
 #define TIMEOUT_US 100000 
 #define MD5_DIGEST_LENGTH 16
 
+#define TYPE_DATA 0
+#define TYPE_ACK 1
+#define TYPE_NACK 2
+#define TYPE_METADATA 3
+
 struct __attribute__((packed)) Header {
     uint32_t seq;
     uint32_t crc;
@@ -38,7 +43,8 @@ uint32_t calculateCRC32(const char *data, size_t length) {
     return ~crc;
 }
 
-void sendPacketReliable(int socket, sockaddr_in& destAddr, uint32_t seq, uint8_t type, const char* data, uint32_t size) {
+void sendPacket(int socket, sockaddr_in& destAddr, uint32_t seq, uint8_t type, const char* data, uint32_t size) {
+    // prepare packet
     char packet[BUFFER_SIZE];
     memset(packet, 0, BUFFER_SIZE);
 
@@ -57,20 +63,24 @@ void sendPacketReliable(int socket, sockaddr_in& destAddr, uint32_t seq, uint8_t
     char ackBuffer[BUFFER_SIZE]; 
     sockaddr_in fromAddr;
 
+    // main send/ack loop
     while (!acknowledged) {
         sendto(socket, packet, sizeof(Header) + size, 0, (const sockaddr*)&destAddr, sizeof(destAddr));
 
+        //check for ack
         int n = recvfrom(socket, ackBuffer, sizeof(Header), 0, (sockaddr*)&fromAddr, &addrLen);
         if (n > 0) {
             Header* ackHead = (Header*)ackBuffer;
-            if (ackHead->type == 1 && ackHead->seq == seq) {
+            if (ackHead->type == TYPE_ACK && ackHead->seq == seq) {
+                // ack received for current packet
                 acknowledged = true;
             }
         } 
     }
 }
 
-int main() {
+int main(int argc, char* argv[]) {
+    // create and configure sockets
     int clientSocket = socket(AF_INET, SOCK_DGRAM, 0);
     if (clientSocket < 0) return 1;
 
@@ -93,7 +103,8 @@ int main() {
     netDerperAddr.sin_port = htons(TARGET_PORT);
     inet_pton(AF_INET, NETDERPER_IP, &netDerperAddr.sin_addr);
 
-    std::string filename = "text.txt";
+    // prepare file
+    std::string filename = argv[1];
     std::ifstream file(filename, std::ios::binary | std::ios::ate);
 
     if (!file.is_open()) {
@@ -104,24 +115,28 @@ int main() {
     std::streamsize fileSize = file.tellg();
     file.seekg(0, std::ios::beg);
 
+    // prepare MD5 context
     EVP_MD_CTX* md5Context = EVP_MD_CTX_new();
     EVP_DigestInit_ex(md5Context, EVP_md5(), NULL);
 
+    // send start metadata
     uint32_t seqNum = 0;
 
     std::string metaData = filename + "|" + std::to_string(fileSize);
-    sendPacketReliable(clientSocket, netDerperAddr, seqNum++, 3, metaData.c_str(), metaData.length());
+    sendPacket(clientSocket, netDerperAddr, seqNum++, TYPE_METADATA, metaData.c_str(), metaData.length());
 
+    // main data sending loop
     char buffer[DATA_SIZE];
     while (file.good()) {
         file.read(buffer, DATA_SIZE);
         int bytesRead = (int)file.gcount();
         if (bytesRead > 0) {
             EVP_DigestUpdate(md5Context, buffer, bytesRead);
-            sendPacketReliable(clientSocket, netDerperAddr, seqNum++, 0, buffer, bytesRead);
+            sendPacket(clientSocket, netDerperAddr, seqNum++, TYPE_DATA, buffer, bytesRead);
         }
     }
 
+    // send end metadata
     unsigned char hash[MD5_DIGEST_LENGTH];
     unsigned int mdLen;
     EVP_DigestFinal_ex(md5Context, hash, &mdLen);
@@ -130,8 +145,9 @@ int main() {
     char hexHash[33];
     for(int i = 0; i < MD5_DIGEST_LENGTH; i++) snprintf(hexHash + (i * 2), 3, "%02x", hash[i]);
 
-    sendPacketReliable(clientSocket, netDerperAddr, seqNum++, 3, hexHash, 32);
+    sendPacket(clientSocket, netDerperAddr, seqNum++, TYPE_METADATA, hexHash, 32);
 
+    // cleanup
     file.close();
     close(clientSocket);
 
